@@ -145,6 +145,7 @@ struct Interrupt {
 #define INTF_SETCLR 0x8000
 #define INTF_INTEN 0x4000
 #define INTF_RBF 0x0800
+#define INTF_EXTER 0x2000
 #define INTF_PORTS 0x0008
 
 /* VHPOSR: vertical beam position (low 8 bits) in the high byte. One
@@ -317,6 +318,9 @@ extern struct Library *GfxBase;
     LP1NR(0x2a0, DeleteMsgPort, struct MsgPort *, port, a0, , SysBase)
 #define SetIntVector(num, interrupt) \
     LP2(0xa2, struct Interrupt *, SetIntVector, LONG, num, d0, struct Interrupt *, interrupt, a1, , SysBase)
+#define SetFunction(lib, offset, func) \
+    LP3(0x1a4, APTR, SetFunction, struct Library *, lib, a1, LONG, offset, a0, \
+        APTR, func, d0, , SysBase)
 #define FindTask(name) \
     LP1(0x126, struct Task *, FindTask, CONST_STRPTR, name, a1, , SysBase)
 #define Signal(task, sigs) \

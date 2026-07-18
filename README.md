@@ -26,20 +26,36 @@ and the BBS banner appears.
 - `s/startup-sequence` -- just runs `term`.
 
 Incoming CSI sequences are reassembled whole and re-emitted in 8-bit
-CSI form, with multi-parameter SGRs (`ESC[1;33m`) split into
-consecutive single-parameter ones: the AROS console only parses the
-single-parameter form (it prints the rest as literal text), and the
-split is semantically identical on Kickstart. Parameterized erase
-sequences get the same treatment, because the Amiga console's `CSI J`
-/ `CSI K` take no parameter and only erase toward the end (and the
-AROS console rejects them outright if a parameter is present, which
-left old text on screen at every BBS page change): `ESC[2J` becomes a
-formfeed (the console's whole-screen clear-and-home, matching the
-ANSI.SYS semantics BBSes assume), `ESC[2K` becomes CR plus
-erase-to-end-of-line, explicit `0` parameters are stripped, and the
-erase-backwards forms (`1J`/`1K`, no console equivalent, rare in BBS
-output) are dropped. `ESC[y;xf` (HVP) is rewritten to the `H` form
-the console understands.
+CSI form, normalized to exactly what the console is known to parse --
+a whitelist, not a pass-through, because the AROS console's failure
+mode for a sequence it cannot match is not "ignored": its command
+scanner runs past the final byte and consumes the output that
+follows, printing fragments of it as literal text (seen live as
+mangled menu lines when the BBS sent its ECMA-48 font selection,
+`ESC[0;40 D`). Concretely:
+
+- Multi-parameter SGRs (`ESC[1;33m`) are split into consecutive
+  single-parameter ones: the AROS console only parses the
+  single-parameter form, and the split is semantically identical on
+  Kickstart.
+- Parameterized erase sequences are translated, because the Amiga
+  console's `CSI J` / `CSI K` take no parameter and only erase toward
+  the end (which left old text on screen at every BBS page change):
+  `ESC[2J` becomes a formfeed (the console's whole-screen
+  clear-and-home, matching the ANSI.SYS semantics BBSes assume),
+  `ESC[2K` becomes CR plus erase-to-end-of-line, explicit `0`
+  parameters are stripped, and the erase-backwards forms (`1J`/`1K`,
+  no console equivalent, rare in BBS output) are dropped.
+- `ESC[y;xf` (HVP) is rewritten to the `H` form the console
+  understands, and `ESC[nG` (cursor to absolute column) becomes CR
+  plus cursor-forward.
+- Cursor motion, insert/delete, and scroll sequences pass through
+  clamped to the parameter count the console accepts (one, two for
+  `H`).
+- Everything else -- private modes (`ESC[?25l`), intermediate bytes,
+  colon subparameters, window ops, save/restore cursor -- is
+  swallowed whole, exactly as a real terminal ignores what it does
+  not implement.
 
 The RBF interrupt handler copes with both interrupt-dispatch
 conventions: classic exec calls it with RBF still pending (the handler
@@ -73,10 +89,35 @@ and there is no key repeat (that was input.device's job). Change the
 `BAUD_*` defines and rebuild to tune. The program also clears the
 DMACON blitter-hog bit at startup, because console scrolls are big
 blits that would otherwise lock the CPU off the chip bus for longer
-than a character time. If receive data is ever provably lost (a Paula
-overrun caught by the handler, or the 8 KiB receive ring overflowing
-because the console cannot render fast enough), a red `[LOST]` marker
-is printed instead of failing silently.
+than a character time.
+
+Clearing blitter-hog is not enough on AROS, though: its m68k
+`WaitBlit` (`arch/m68k-amiga/graphics/waitblit.S`) re-asserts
+blitter-nasty for the duration of every wait and deliberately parks
+the CPU off the chip bus until the blit completes. With no fast RAM,
+the RBF handler's instruction fetches stall with it, so any console
+blit longer than a character time silently overran Paula's one-byte
+receive latch (measured: ~12 lost bytes per 10 KiB page, surfacing as
+scattered mangled characters). The kiosk therefore `SetFunction()`s
+graphics.library `WaitBlit` with a plain busy-spin that leaves
+blitter-nasty alone: blits finish a little slower with the CPU
+sharing the bus, and reception stays byte-perfect (verified with
+emulator-side overrun instrumentation: zero drops across the same
+replayed page).
+
+The receive ring between the interrupt handler and the console is
+32 KiB -- about 17 seconds of line-rate data. That is deliberate: the
+AROS console renders SGR-heavy screens far slower than the 19200 line
+rate, so most of a large BBS page sits in the ring while the console
+catches up, and the ring must hold a whole page (the 8 KiB it replaced
+overflowed mid-page on the larger Retro32 menus, which surfaced as
+mangled text in the second half of the page). On overflow the handler
+now drops the new byte cleanly -- the write pointer must not step past
+an unwritten slot, or the drain loop replays whatever that slot held a
+lap earlier, silently substituting stale bytes into the stream. If
+receive data is ever provably lost (a Paula overrun caught by the
+handler, or the ring overflowing), a red `[LOST]` marker is printed
+instead of failing silently.
 
 Why not serial.device? Kickstart 2.0+ keeps it on the Workbench disk
 (`DEVS:`), and the AROS ROM has no openable serial.device from a bare
