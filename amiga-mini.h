@@ -205,6 +205,14 @@ struct ColorSpec {
     UWORD Blue;
 };
 
+/* graphics/text.h: font request, for NewScreen.Font. */
+struct TextAttr {
+    const char *ta_Name;
+    UWORD ta_YSize;
+    UBYTE ta_Style;
+    UBYTE ta_Flags;
+};
+
 /* intuition/screens.h screen tags (V36+). */
 #define SA_Dummy (TAG_USER + 32)
 #define SA_Width (SA_Dummy + 3)

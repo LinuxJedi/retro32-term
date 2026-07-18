@@ -217,7 +217,9 @@ static void start_con_read(void)
  * mis-render it) and re-emitted in the 8-bit CSI form. Multi-parameter SGR
  * sequences (ESC[1;33m) are split into consecutive single-parameter ones:
  * the AROS console only understands the single-parameter form, and the
- * split is semantically identical on Kickstart. */
+ * split is semantically identical on Kickstart. Parameterized erase
+ * sequences (ESC[2J page clears, ESC[2K line clears) are translated to
+ * console equivalents (see emit_csi_erase), and HVP (ESC[y;xf) to CUP. */
 #define SEQ_MAX 48
 static UBYTE seq[SEQ_MAX];
 static WORD seq_len;
@@ -229,6 +231,34 @@ static LONG emit(LONG n, UBYTE b)
     if (n < CHUNK)
         chunk[n++] = b;
     return n;
+}
+
+/* ED/EL (CSI Pn J / CSI Pn K): the Amiga console's J and K take no
+ * parameter and only erase toward the end of the display/line (the AROS
+ * console rejects the whole sequence if a parameter is present), while
+ * BBSes lean on the ANSI.SYS forms - ESC[2J clears the whole screen and
+ * homes the cursor, ESC[2K blanks the whole line and returns to column
+ * 1. Translate: 2J (and xterm's 3J) becomes a formfeed, which is the
+ * console's own whole-screen clear-and-home on Kickstart and AROS
+ * alike; 2K becomes CR plus erase-to-end; 0 or no parameter passes
+ * through with the parameter stripped; the erase-backwards forms (1J,
+ * 1K) have no console equivalent and are rare in BBS output, so they
+ * are dropped. */
+static LONG emit_csi_erase(LONG n, UBYTE final)
+{
+    WORD v = 0;
+    WORD i;
+    for (i = 0; i < seq_len && seq[i] >= '0' && seq[i] <= '9'; i++)
+        v = v * 10 + (seq[i] - '0');
+    if (v >= 2) {
+        if (final == 'J')
+            return emit(n, 0x0C);
+        n = emit(n, '\r');
+    } else if (v == 1) {
+        return n;
+    }
+    n = emit(n, 0x9B);
+    return emit(n, final);
 }
 
 static LONG emit_csi_split_sgr(LONG n)
@@ -289,6 +319,10 @@ static LONG emit_byte(LONG n, UBYTE b)
                     return emit_csi_split_sgr(n);
             }
         }
+        if (b == 'J' || b == 'K')
+            return emit_csi_erase(n, b);
+        if (b == 'f')
+            b = 'H'; /* HVP: same motion as CUP, which the console has */
         n = emit(n, 0x9B);
         for (i = 0; i < seq_len; i++)
             n = emit(n, seq[i]);
@@ -453,6 +487,12 @@ static void kiosk_loop(void)
     }
 }
 
+/* The console renders in the screen's font, and a bare-floppy Kickstart
+ * boot can default that to a wider Topaz (observed: 10x9 on 3.1, a
+ * 64-column console); BBS pages are drawn for 80 columns, so pin the
+ * 8x8 Topaz the layouts assume. */
+static struct TextAttr topaz8 = { "topaz.font", 8, 0, 0 };
+
 static int setup(void)
 {
     struct ColorSpec colors[9];
@@ -503,6 +543,7 @@ static int setup(void)
     ns.BlockPen = 1;
     ns.ViewModes = HIRES;
     ns.Type = CUSTOMSCREEN | SCREENQUIET;
+    ns.Font = (APTR)&topaz8;
     height = 256;
     ns.Height = height;
     screen = OpenScreenTagList(&ns, screen_tags);

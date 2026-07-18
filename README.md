@@ -29,7 +29,17 @@ Incoming CSI sequences are reassembled whole and re-emitted in 8-bit
 CSI form, with multi-parameter SGRs (`ESC[1;33m`) split into
 consecutive single-parameter ones: the AROS console only parses the
 single-parameter form (it prints the rest as literal text), and the
-split is semantically identical on Kickstart.
+split is semantically identical on Kickstart. Parameterized erase
+sequences get the same treatment, because the Amiga console's `CSI J`
+/ `CSI K` take no parameter and only erase toward the end (and the
+AROS console rejects them outright if a parameter is present, which
+left old text on screen at every BBS page change): `ESC[2J` becomes a
+formfeed (the console's whole-screen clear-and-home, matching the
+ANSI.SYS semantics BBSes assume), `ESC[2K` becomes CR plus
+erase-to-end-of-line, explicit `0` parameters are stripped, and the
+erase-backwards forms (`1J`/`1K`, no console equivalent, rare in BBS
+output) are dropped. `ESC[y;xf` (HVP) is rewritten to the `H` form
+the console understands.
 
 The RBF interrupt handler copes with both interrupt-dispatch
 conventions: classic exec calls it with RBF still pending (the handler
