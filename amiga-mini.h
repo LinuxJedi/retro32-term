@@ -137,13 +137,47 @@ struct Interrupt {
 
 #define DMAF_BLITHOG 0x0400
 
-#define SERDATR_RBF (1 << 14) /* receive buffer full */
-#define SERDATR_TBE (1 << 13) /* transmit buffer empty */
+#define SERDATR_OVRUN (1 << 15) /* receive overrun; cleared by RBF ack */
+#define SERDATR_RBF (1 << 14)   /* receive buffer full */
+#define SERDATR_TBE (1 << 13)   /* transmit buffer empty */
 
 #define INTB_RBF 11
 #define INTF_SETCLR 0x8000
 #define INTF_INTEN 0x4000
 #define INTF_RBF 0x0800
+#define INTF_PORTS 0x0008
+
+/* VHPOSR: vertical beam position (low 8 bits) in the high byte. One
+ * raster line is 63.5 us; counting its transitions gives a delay that
+ * needs no timer hardware. */
+#define CUSTOM_VHPOSR (*(volatile UWORD *)0xDFF006)
+
+/* --- CIA-A (keyboard) ---------------------------------------------------- */
+
+#define CIAA_SDR (*(volatile UBYTE *)0xBFEC01) /* keyboard shift register */
+#define CIAA_ICR (*(volatile UBYTE *)0xBFED01) /* int flags; read clears */
+#define CIAA_CRA (*(volatile UBYTE *)0xBFEE01)
+
+#define CIAICRF_SP 0x08     /* serial-port (keyboard byte) int flag */
+#define CIACRAF_SPMODE 0x40 /* SP line output mode: drives KDAT low */
+
+/* --- input events (devices/inputevent.h) --------------------------------- */
+
+#define IECLASS_RAWKEY 0x01
+#define IECODE_UP_PREFIX 0x80
+
+struct InputEvent {
+    struct InputEvent *ie_NextEvent;
+    UBYTE ie_Class;
+    UBYTE ie_SubClass;
+    UWORD ie_Code;
+    UWORD ie_Qualifier;
+    ULONG ie_EventAddress; /* union ie_position; zeroed here */
+    ULONG ie_Seconds;      /* struct timeval ie_TimeStamp */
+    ULONG ie_Micros;
+};
+
+struct KeyMap; /* opaque; passing NULL selects the default keymap */
 
 /* --- utility tags --------------------------------------------------------- */
 
@@ -234,6 +268,10 @@ extern struct Library *GfxBase;
 #include <inline/macros.h>
 
 /* exec.library (offsets from inline/exec.h) */
+#define Forbid() \
+    LP0NR(0x84, Forbid, , SysBase)
+#define Permit() \
+    LP0NR(0x8a, Permit, , SysBase)
 #define Wait(sigs) \
     LP1(0x13e, ULONG, Wait, ULONG, sigs, d0, , SysBase)
 #define GetMsg(port) \
@@ -299,5 +337,15 @@ extern struct Library *GfxBase;
 #define SetRGB4(vp, n, r, g, b) \
     LP5NR(0x120, SetRGB4, struct ViewPort *, vp, a0, WORD, n, d0, \
           UBYTE, r, d1, UBYTE, g, d2, UBYTE, b, d3, , GfxBase)
+
+/* console.device library-style call (offset from inline/console.h; the
+ * base is the opened device, io_Device from any console IORequest).
+ * Translates one IECLASS_RAWKEY InputEvent through the keymap without
+ * involving any other task, so it is callable under Forbid(). */
+extern struct Library *ConsoleDevice;
+#define RawKeyConvert(events, buffer, length, keyMap) \
+    LP4(0x30, LONG, RawKeyConvert, struct InputEvent *, events, a0, \
+        UBYTE *, buffer, a1, LONG, length, d1, \
+        struct KeyMap *, keyMap, a2, , ConsoleDevice)
 
 #endif /* AMIGA_MINI_H */

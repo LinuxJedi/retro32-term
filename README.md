@@ -40,16 +40,33 @@ ring indices between the handler and the main loop are UWORDs: a 68000
 writes a word atomically but a longword as two accesses, and a torn
 32-bit counter silently drops bytes.
 
-Line settings: 8N1, rate picked at startup -- 19200 on Kickstart, 4800
-on AROS (detected via `FindResident("aros.library")`). Paula buffers a
+Line settings: 8N1, 19200 on both Kickstart and AROS. Paula buffers a
 single received byte, so every byte must be serviced within one
-character time: Kickstart manages 19200 comfortably, while AROS's
-scheduler masks all interrupts in roughly millisecond stretches, so its
-rate needs a character time well above that. Change the `BAUD_*`
-defines and rebuild to tune. The program also clears the DMACON
-blitter-hog bit at startup, because console scrolls are big blits that
-would otherwise lock the CPU off the chip bus for longer than a
-character time.
+character time; Kickstart manages 19200 comfortably. AROS's scheduler
+masks all interrupts in roughly millisecond stretches -- longer than a
+19200 character time -- which used to force 4800 there. The terminal
+now sidesteps the AROS scheduler entirely: those masked stretches only
+happen when the interrupt-exit path invokes the scheduler
+(`core_ExitIntr` in AROS's `arch/m68k-all/kernel/kernel_intr.c`), and
+that is skipped whenever task switching is disabled. So on AROS
+(detected via `FindResident("aros.library")`) the main loop holds
+`Forbid()` permanently and never calls `Wait()` -- it busy-polls
+instead, which a dedicated kiosk disk can afford -- and the RBF
+interrupt then always runs on time. Console output still works under a
+permanent Forbid because AROS completes console `CMD_WRITE` in the
+caller's context; console reads would not, so in this mode the keyboard
+is polled straight from CIA-A (scancode from SDR, KDAT handshake by
+beam-counter timing) and translated through console.device's
+synchronous `RawKeyConvert()`. The trade-offs: on AROS no other task
+ever runs again (fine, it is a kiosk; Ctrl-Amiga-Amiga still reboots)
+and there is no key repeat (that was input.device's job). Change the
+`BAUD_*` defines and rebuild to tune. The program also clears the
+DMACON blitter-hog bit at startup, because console scrolls are big
+blits that would otherwise lock the CPU off the chip bus for longer
+than a character time. If receive data is ever provably lost (a Paula
+overrun caught by the handler, or the 8 KiB receive ring overflowing
+because the console cannot render fast enough), a red `[LOST]` marker
+is printed instead of failing silently.
 
 Why not serial.device? Kickstart 2.0+ keeps it on the Workbench disk
 (`DEVS:`), and the AROS ROM has no openable serial.device from a bare
@@ -62,12 +79,16 @@ dedicated kiosk disk should do anyway.
 - **Kickstart 2.0+ (2.05 and 3.1 verified): byte-perfect, full ANSI
   colour on black, 19200 baud.**
 - **The AROS m68k ROM Copperline bundles: byte-perfect, full ANSI
-  colour on black, 4800 baud.** Needs Copperline v0.13+ (the Paula
-  receive fixes in [Copperline PR
-  #218](https://github.com/LinuxJedi/Copperline/pull/218)). One
-  AROS-only footnote: the kernel writes its boot log to the serial
-  line before the terminal starts -- a real BBS dialled after boot
-  never sees it, and the browser bridge connects after boot anyway.
+  colour on black, 19200 baud** via the permanent-Forbid kiosk mode
+  described above (verified against a 6.6 KiB continuous back-to-back
+  blast: zero dropped bytes, where the pre-kiosk `Wait()` loop at
+  19200 visibly shreds the same stream). Needs Copperline v0.13+ (the
+  Paula receive fixes in [Copperline PR
+  #218](https://github.com/LinuxJedi/Copperline/pull/218)). AROS-only
+  footnotes: the kernel writes its boot log to the serial line before
+  the terminal starts -- a real BBS dialled after boot never sees it,
+  and the browser bridge connects after boot anyway -- and held keys
+  do not repeat.
 - Kickstart 1.x: not supported (the console plumbing uses
   `CreateMsgPort`/`CreateIORequest`, V36+).
 

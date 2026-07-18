@@ -28,19 +28,19 @@
  * required beyond the toolchain's own <inline/macros.h>. */
 #include "amiga-mini.h"
 
-/* The line settings: 8N1, rate picked at startup. Paula buffers a single
+/* The line settings: 8N1, 19200 everywhere. Paula buffers a single
  * received byte, so every byte must be serviced within one character time.
  * Kickstart's exec dispatches the RBF vector with the flag still set and
  * comfortably services 19200 on a stock 68000 (with the BLTPRI note in
- * setup). AROS acks INTREQ before walking a heavier dispatch chain, so a
- * word can overwrite the receive latch if service slips past a character
- * time -- and AROS's scheduler/idle loop also masks all interrupts in
- * stretches of roughly a millisecond, so reliable reception needs a
- * character time comfortably above that. 4800 gives a 2 ms budget. The
- * Copperline bridge itself is not paced; this only sets how fast the
- * guest side reads and writes. */
+ * setup). AROS's scheduler masks all interrupts in stretches of roughly a
+ * millisecond -- longer than a 19200 character time (~520 us) -- which
+ * used to force 4800 here; the terminal now sidesteps the scheduler
+ * entirely on AROS by running a permanent-Forbid() kiosk loop (see
+ * kiosk_loop below), which lets AROS hold 19200 too. The defines stay
+ * separate as tuning knobs. The Copperline bridge itself is not paced;
+ * this only sets how fast the guest side reads and writes. */
 #define BAUD_KICKSTART 19200UL
-#define BAUD_AROS 4800UL
+#define BAUD_AROS 19200UL
 
 /* SERPER divisor from the PAL colour clock (an NTSC machine lands within
  * 1%, well inside the UART's tolerance at these rates). */
@@ -48,6 +48,9 @@
 #define SERPER_FOR(baud) ((UWORD)((PAL_COLOR_CLOCK + (baud) / 2) / (baud) - 1))
 
 static ULONG baud;
+static BOOL on_aros;
+
+struct Library *ConsoleDevice;
 
 /* How much serial data to move to the console per wakeup. */
 #define CHUNK 4096
@@ -61,6 +64,12 @@ static ULONG baud;
 #define RING 8192
 static volatile UBYTE ring[RING];
 static volatile UWORD rx_head, rx_tail;
+
+/* Set by the interrupt handler when receive data was provably lost (a
+ * Paula overrun, or a byte arriving with the ring full); the main loop
+ * turns it into a visible marker rather than silently corrupting the
+ * session. */
+static volatile UBYTE rx_lost;
 
 struct Library *IntuitionBase;
 struct Library *GfxBase;
@@ -113,7 +122,13 @@ static void rbf_bank(UWORD datr)
     UWORD next = rx_head + 1;
     if ((UWORD)(next - rx_tail) <= RING)
         ring[rx_head % RING] = (UBYTE)datr;
+    else
+        rx_lost = 1;
     rx_head = next;
+    /* OVRUN means a word completed while the previous one was still
+     * unserviced: Paula dropped it. Latched until the RBF ack below. */
+    if (datr & SERDATR_OVRUN)
+        rx_lost = 1;
 }
 
 void rbf_c(void)
@@ -169,6 +184,20 @@ static void con_puts(const char *s)
     while (s[n])
         n++;
     con_write((const UBYTE *)s, n);
+}
+
+static void con_put_num(ULONG v)
+{
+    char buf[11];
+    WORD i = 10;
+    buf[i] = 0;
+    if (!v)
+        buf[--i] = '0';
+    while (v) {
+        buf[--i] = (char)('0' + v % 10);
+        v /= 10;
+    }
+    con_puts(&buf[i]);
 }
 
 static void start_con_read(void)
@@ -281,6 +310,10 @@ static LONG emit_byte(LONG n, UBYTE b)
  * CHUNK-sized writes. */
 static void drain_serial(void)
 {
+    if (rx_lost) {
+        rx_lost = 0;
+        con_puts("\x9B" "41m\x9B" "37m[LOST]\x9B" "0m");
+    }
     while (rx_tail != rx_head) {
         LONG n = 0;
         /* Splitting can expand a byte severalfold; leave headroom. */
@@ -310,6 +343,114 @@ static void forward_key(UBYTE c)
         ser_write(esc_bracket, 2);
     else
         ser_write(&c, 1);
+}
+
+/* --- AROS Forbid() kiosk mode ---------------------------------------------
+ * AROS's m68k interrupt-exit path (arch/m68k-all/kernel/kernel_intr.c,
+ * core_ExitIntr) invokes the task scheduler only while task switching is
+ * enabled (TDNestCnt < 0), and that scheduler runs with interrupts
+ * masked (IPL 7 / INTENA off) in stretches of roughly a millisecond --
+ * longer than a 19200 character time, so Paula's one-byte receive latch
+ * gets overwritten and bytes vanish. This disk owns the whole machine,
+ * so on AROS the main loop holds Forbid() permanently and never calls
+ * Wait() (Wait breaks Forbid while the task sleeps): with TDNestCnt >= 0
+ * the dispatch windows never open and the RBF interrupt stays timely.
+ * What remains is the level-6 CIA handlers, which Kickstart also has and
+ * which fit inside a character time.
+ *
+ * The price is that no other task ever runs again:
+ * - Console writes still work: AROS console.device completes CMD_WRITE
+ *   in the caller's context (rom/devs/console/console.c BeginIO leaves
+ *   it done_quick), so DoIO never sleeps.
+ * - Console CMD_READ would never complete (it is handed to the console
+ *   device's task), so the keyboard is read from the CIA-A hardware
+ *   here instead: INTENA's PORTS bit is cleared so the OS keyboard
+ *   handler no longer swallows the scancodes, then the loop polls the
+ *   SP flag, takes the scancode from SDR, performs the KDAT handshake,
+ *   and feeds the code through console.device's RawKeyConvert() -- on
+ *   AROS a synchronous keymap.library call, safe under Forbid. Key
+ *   repeat was input.device's job, so kiosk mode has none. */
+
+static UWORD kbd_qual; /* live IEQUALIFIER_* bits, tracked from raw ups */
+
+/* Delay by watching the vertical beam counter advance: each raster line
+ * is 63.5 us, so `lines` transitions bound the wait below from
+ * (lines - 1) * 63.5 us without touching any timer hardware. */
+static void beam_wait_lines(WORD lines)
+{
+    UBYTE v = (UBYTE)(CUSTOM_VHPOSR >> 8);
+    while (lines > 0) {
+        UBYTE w = (UBYTE)(CUSTOM_VHPOSR >> 8);
+        if (w != v) {
+            v = w;
+            lines--;
+        }
+    }
+}
+
+static void kbd_rawkey(UBYTE code)
+{
+    struct InputEvent ie;
+    UBYTE buf[16];
+    LONG n, i;
+
+    if ((code & 0x7F) >= 0x60 && (code & 0x7F) <= 0x67) {
+        /* The qualifier keys 0x60-0x67 map one-to-one onto the low
+         * IEQUALIFIER bits. Caps lock reports down on engage and up on
+         * release, so plain down/up tracking is right for it too. */
+        UWORD bit = 1 << ((code & 0x7F) - 0x60);
+        if (code & IECODE_UP_PREFIX)
+            kbd_qual &= ~bit;
+        else
+            kbd_qual |= bit;
+        return;
+    }
+    /* Ignoring all other ups also swallows the keyboard MCU status
+     * codes (F9-FE decode as ups of codes >= 0x79). */
+    if (code & IECODE_UP_PREFIX)
+        return;
+
+    ie.ie_NextEvent = NULL;
+    ie.ie_Class = IECLASS_RAWKEY;
+    ie.ie_SubClass = 0;
+    ie.ie_Code = code;
+    ie.ie_Qualifier = kbd_qual;
+    ie.ie_EventAddress = 0;
+    ie.ie_Seconds = 0;
+    ie.ie_Micros = 0;
+    n = RawKeyConvert(&ie, buf, (LONG)sizeof(buf), NULL);
+    for (i = 0; i < n; i++)
+        forward_key(buf[i]);
+}
+
+static void kbd_poll(void)
+{
+    UBYTE raw;
+
+    if (!(CIAA_ICR & CIAICRF_SP)) /* read clears all CIA-A int flags */
+        return;
+    raw = CIAA_SDR;
+
+    /* Handshake: drive KDAT low for at least two raster lines (127 us,
+     * above the HRM's 85 us minimum) so the keyboard MCU sends the next
+     * byte. Ack first, translate after. */
+    CIAA_CRA |= CIACRAF_SPMODE;
+    beam_wait_lines(3);
+    CIAA_CRA &= ~CIACRAF_SPMODE;
+
+    /* SDR holds the byte as shifted off the wire; the classic decode is
+     * ror.b then not.b, leaving the rawkey code plus the up bit. */
+    kbd_rawkey((UBYTE)~((raw >> 1) | (raw << 7)));
+}
+
+static void kiosk_loop(void)
+{
+    Forbid();
+    CUSTOM_INTENA = INTF_PORTS; /* CIA-A ints off the CPU; kbd_poll owns them */
+    for (;;) {
+        drain_serial();
+        kbd_poll();
+    }
 }
 
 static int setup(void)
@@ -406,6 +547,7 @@ static int setup(void)
     con_open = TRUE;
     con_rd->io_Device = con_wr->io_Device;
     con_rd->io_Unit = con_wr->io_Unit;
+    ConsoleDevice = (struct Library *)con_wr->io_Device;
 
     /* Take over the serial hardware: our RBF handler banks received bytes
      * and signals the main loop. */
@@ -428,8 +570,9 @@ static int setup(void)
     CUSTOM_DMACON = DMAF_BLITHOG;
 
     /* AROS exposes a resident no Kickstart has; see the baud note at the
-     * top of the file. */
-    baud = FindResident("aros.library") ? BAUD_AROS : BAUD_KICKSTART;
+     * top of the file and kiosk_loop. */
+    on_aros = FindResident("aros.library") != NULL;
+    baud = on_aros ? BAUD_AROS : BAUD_KICKSTART;
     CUSTOM_SERPER = SERPER_FOR(baud);
     old_rbf = SetIntVector(INTB_RBF, &rbf_interrupt);
     rbf_installed = TRUE;
@@ -486,10 +629,21 @@ int main(void)
     }
 
     con_puts("\x9B" "37m\x9B" "1mRetro32 Terminal\x9B" "0m\x9B" "37m  ");
-    con_puts(baud == BAUD_AROS ? "4800" : "19200");
+    con_put_num(baud);
     con_puts(" 8N1, ANSI/Topaz\r\n"
              "Serial line ready - connect the bridge, then press Return.\r\n"
              "\r\n");
+
+    /* On AROS take over the machine for good; see the kiosk_loop note.
+     * It never returns (an exit would need Permit and a rate the AROS
+     * scheduler can survive; the kiosk has no reason to exit -- the
+     * keyboard MCU still honours Ctrl-Amiga-Amiga for a reboot).
+     * NO_KIOSK builds keep the old Wait() loop on AROS as a test control
+     * for demonstrating the drops the kiosk exists to avoid. */
+#ifndef NO_KIOSK
+    if (on_aros)
+        kiosk_loop();
+#endif
 
     start_con_read();
     con_sig = 1UL << con_rd_port->mp_SigBit;
