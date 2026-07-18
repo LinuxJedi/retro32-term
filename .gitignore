@@ -1,0 +1,3 @@
+# Intermediate build artifact; the shippable output is retro32-term.adf,
+# which is committed.
+term
