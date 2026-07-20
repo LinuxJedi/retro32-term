@@ -107,6 +107,11 @@ static struct Interrupt *old_rbf;
 static BOOL rbf_installed;
 static BOOL dtr_asserted;
 
+/* Blank pointer sprite: control words + one bitplane row + terminator,
+ * all zero. Must live in chip RAM and stay allocated while set. */
+#define BLANK_POINTER_BYTES 12
+static UWORD *blank_pointer;
+
 static UBYTE con_ch; /* 1-byte console read landing zone */
 static UBYTE chunk[CHUNK];
 
@@ -740,6 +745,14 @@ static int setup(void)
     if (!window)
         return 4;
 
+    /* The kiosk takes no pointer input, so hide the Intuition pointer:
+     * a blank 1-row sprite (chip RAM, zeroed) instead of the busy/arrow
+     * imagery darting over the text whenever the host mouse moves.
+     * Failing to allocate just leaves the normal pointer - cosmetic. */
+    blank_pointer = AllocMem(BLANK_POINTER_BYTES, MEMF_CHIP | MEMF_CLEAR);
+    if (blank_pointer)
+        SetPointer(window, blank_pointer, 1, 16, 0, 0);
+
     con_rd_port = CreateMsgPort();
     con_wr_port = CreateMsgPort();
     if (!con_rd_port || !con_wr_port)
@@ -831,6 +844,12 @@ static void cleanup(void)
         DeleteMsgPort(con_wr_port);
     if (con_rd_port)
         DeleteMsgPort(con_rd_port);
+    if (blank_pointer) {
+        if (window)
+            ClearPointer(window);
+        FreeMem(blank_pointer, BLANK_POINTER_BYTES);
+        blank_pointer = NULL;
+    }
     if (window)
         CloseWindow(window);
     if (screen)

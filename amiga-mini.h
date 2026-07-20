@@ -340,6 +340,14 @@ extern struct Library *GfxBase;
 #define FreeSignal(num) \
     LP1NR(0x150, FreeSignal, LONG, num, d0, , SysBase)
 
+#define AllocMem(size, reqs) \
+    LP2(0xc6, APTR, AllocMem, ULONG, size, d0, ULONG, reqs, d1, , SysBase)
+#define FreeMem(mem, size) \
+    LP2NR(0xd2, FreeMem, APTR, mem, a1, ULONG, size, d0, , SysBase)
+
+#define MEMF_CHIP 0x2UL
+#define MEMF_CLEAR 0x10000UL
+
 /* intuition.library (offsets from inline/intuition.h) */
 #define OpenScreen(ns) \
     LP1(0xc6, struct Screen *, OpenScreen, struct NewScreen *, ns, a0, , IntuitionBase)
@@ -354,6 +362,11 @@ extern struct Library *GfxBase;
     LP1NR(0x48, CloseWindow, struct Window *, w, a0, , IntuitionBase)
 #define ViewPortAddress(w) \
     LP1(0x12c, struct ViewPort *, ViewPortAddress, struct Window *, w, a0, , IntuitionBase)
+#define SetPointer(w, p, h, wd, x, y) \
+    LP6NR(0x10e, SetPointer, struct Window *, w, a0, UWORD *, p, a1, LONG, h, d0, \
+          LONG, wd, d1, LONG, x, d2, LONG, y, d3, , IntuitionBase)
+#define ClearPointer(w) \
+    LP1NR(0x3c, ClearPointer, struct Window *, w, a0, , IntuitionBase)
 
 /* graphics.library (offset from inline/graphics.h) */
 #define SetRGB4(vp, n, r, g, b) \
