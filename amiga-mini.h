@@ -162,6 +162,16 @@ struct Interrupt {
 #define CIAICRF_SP 0x08     /* serial-port (keyboard byte) int flag */
 #define CIACRAF_SPMODE 0x40 /* SP line output mode: drives KDAT low */
 
+/* --- CIA-B (RS-232 control lines) ---------------------------------------- */
+
+#define CIAB_PRA (*(volatile UBYTE *)0xBFD000)
+#define CIAB_DDRA (*(volatile UBYTE *)0xBFD200)
+
+/* Port-A bits 7:6 drive the serial connector through inverting 1488
+ * drivers, so a low CIA pin is an asserted RS-232 line. */
+#define CIAF_COMDTR 0x80 /* /DTR: low = terminal ready */
+#define CIAF_COMRTS 0x40 /* /RTS: low = request to send */
+
 /* --- input events (devices/inputevent.h) --------------------------------- */
 
 #define IECLASS_RAWKEY 0x01

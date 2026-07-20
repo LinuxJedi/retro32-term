@@ -105,6 +105,7 @@ static ULONG ser_sigmask;
 static struct Interrupt rbf_interrupt;
 static struct Interrupt *old_rbf;
 static BOOL rbf_installed;
+static BOOL dtr_asserted;
 
 static UBYTE con_ch; /* 1-byte console read landing zone */
 static UBYTE chunk[CHUNK];
@@ -792,11 +793,23 @@ static int setup(void)
     CUSTOM_INTREQ = INTF_RBF;                       /* clear stale RBF */
     CUSTOM_INTENA = INTF_SETCLR | INTF_INTEN | INTF_RBF;
 
+    /* Raise DTR and RTS the way serial.device's Open does: whatever is on
+     * the far end of the wire keys off DTR to know a terminal is ready.
+     * The Copperline browser bridge defers its BBS dial until the guest
+     * asserts DTR, so raising it only here - after the console and the RBF
+     * handler are live - guarantees the BBS greeting lands on a screen
+     * that can show it. Bits 7:6 only; PA5-PA0 belong to other lines. */
+    CIAB_DDRA |= CIAF_COMDTR | CIAF_COMRTS;
+    CIAB_PRA &= (UBYTE)~(CIAF_COMDTR | CIAF_COMRTS);
+    dtr_asserted = TRUE;
+
     return 0;
 }
 
 static void cleanup(void)
 {
+    if (dtr_asserted) /* hang up: drop DTR/RTS so the far end sees us go */
+        CIAB_PRA |= CIAF_COMDTR | CIAF_COMRTS;
     if (rbf_installed) {
         CUSTOM_INTENA = INTF_RBF; /* disable RBF, leave the master alone */
         CUSTOM_INTREQ = INTF_RBF;
@@ -843,8 +856,13 @@ int main(void)
 
     con_puts("\x9B" "37m\x9B" "1mRetro32 Terminal\x9B" "0m\x9B" "37m  ");
     con_put_num(baud);
+    /* DTR is up (setup raised it), so a bridge armed with a deferred
+     * dial connects right about now and the far end's greeting simply
+     * appears. Do not invite a blind Return: at a BBS login prompt an
+     * unsolicited Return reads as an empty name and starts the new-user
+     * flow. */
     con_puts(" 8N1, ANSI/Topaz\r\n"
-             "Serial line ready - connect the bridge, then press Return.\r\n"
+             "Serial line ready - click Connect on the page if you have not already.\r\n"
              "\r\n");
 
     /* On AROS take over the machine for good; see the kiosk_loop note.
