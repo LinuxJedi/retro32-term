@@ -18,8 +18,14 @@
  * identically on every Kickstart and on AROS. This disk is a dedicated
  * kiosk: it assumes nothing else is using the serial hardware.
  *
- * Needs Kickstart 2.0+ (or the AROS ROM Copperline bundles) for
- * CreateMsgPort/CreateIORequest. Public domain (see LICENSE).
+ * Runs on Kickstart 1.3 as well as 2.0+ and the AROS ROM Copperline
+ * bundles. The three 2.0-only dependencies are fenced off: build.sh
+ * links libnix13 (stock libnix backs the compiler's 32-bit divide and
+ * multiply helpers with utility.library, which 1.3 does not have), the
+ * message ports and IORequests are hand-rolled statics (CreateMsgPort/
+ * CreateIORequest are V36+), and the screen open falls back from
+ * OpenScreenTagList to OpenScreen plus LoadRGB4/ShowTitle on a V34
+ * intuition. Public domain (see LICENSE).
  *
  * Build: see build.sh (m68k-amigaos-gcc / bebbo toolchain).
  */
@@ -671,6 +677,37 @@ static void kiosk_loop(void)
  * 8x8 Topaz the layouts assume. */
 static struct TextAttr topaz8 = { "topaz.font", 8, 0, 0 };
 
+/* Exec's CreateMsgPort/CreateIORequest are V36+ and this program
+ * otherwise runs on Kickstart 1.3, so the ports and requests are static
+ * structures initialized by hand. The ports are private (never
+ * AddPort'ed), which is all CreateMsgPort produced here anyway; the
+ * signal bit is the only real allocation. */
+static struct MsgPort port_rd, port_wr;
+static struct IOStdReq ioreq_rd, ioreq_wr;
+
+static struct MsgPort *port_init(struct MsgPort *port)
+{
+    BYTE sig = AllocSignal(-1);
+    if (sig < 0)
+        return NULL;
+    port->mp_Node.ln_Type = NT_MSGPORT;
+    port->mp_Flags = PA_SIGNAL;
+    port->mp_SigBit = (UBYTE)sig;
+    port->mp_SigTask = FindTask(NULL);
+    port->mp_MsgList.lh_Head = (struct Node *)&port->mp_MsgList.lh_Tail;
+    port->mp_MsgList.lh_Tail = NULL;
+    port->mp_MsgList.lh_TailPred = (struct Node *)&port->mp_MsgList.lh_Head;
+    return port;
+}
+
+static struct IOStdReq *ioreq_init(struct IOStdReq *req, struct MsgPort *port)
+{
+    req->io_Message.mn_Node.ln_Type = NT_MESSAGE;
+    req->io_Message.mn_ReplyPort = port;
+    req->io_Message.mn_Length = sizeof(struct IOStdReq);
+    return req;
+}
+
 static int setup(void)
 {
     struct ColorSpec colors[9];
@@ -678,13 +715,17 @@ static int setup(void)
     struct NewScreen ns;
     struct NewWindow nw;
     WORD height, i;
+    BOOL v36;
 
-    IntuitionBase = OpenLibrary("intuition.library", 36);
+    /* 33 is Kickstart 1.2's version; every V36-only call below branches
+     * on the version actually present. */
+    IntuitionBase = OpenLibrary("intuition.library", 33);
     if (!IntuitionBase)
         return 1;
-    GfxBase = OpenLibrary("graphics.library", 36);
+    GfxBase = OpenLibrary("graphics.library", 33);
     if (!GfxBase)
         return 2;
+    v36 = IntuitionBase->lib_Version >= 36;
 
     /* Hand the ANSI palette to intuition itself with SA_Colors: OpenScreen
      * applies it as the last step of its own colour setup, which is the
@@ -712,7 +753,8 @@ static int setup(void)
     /* The geometry stays in the NewScreen (ViewModes selects hires; a
      * tags-only open picks the default monitor's lores and shows half the
      * columns), with the tags layered on top -- the classic ExtNewScreen
-     * pattern. PAL rows first, NTSC rows if the machine cannot do 256. */
+     * pattern -- when intuition is new enough to take tags at all. PAL
+     * rows first, NTSC rows if the machine cannot do 256. */
     for (i = 0; i < (WORD)sizeof(ns); i++)
         ((UBYTE *)&ns)[i] = 0;
     ns.Width = 640;
@@ -724,11 +766,11 @@ static int setup(void)
     ns.Font = (APTR)&topaz8;
     height = 256;
     ns.Height = height;
-    screen = OpenScreenTagList(&ns, screen_tags);
+    screen = v36 ? OpenScreenTagList(&ns, screen_tags) : OpenScreen(&ns);
     if (!screen) {
         height = 200;
         ns.Height = height;
-        screen = OpenScreenTagList(&ns, screen_tags);
+        screen = v36 ? OpenScreenTagList(&ns, screen_tags) : OpenScreen(&ns);
     }
     if (!screen)
         return 3;
@@ -745,6 +787,16 @@ static int setup(void)
     if (!window)
         return 4;
 
+    /* A V34 intuition ignored the tags, so do their work by hand: drop
+     * the title bar behind the backdrop window and load the palette.
+     * The OpenScreen-applies-it ordering SA_Colors exists for only
+     * matters on AROS, which is always V36+; on Kickstart a LoadRGB4
+     * after the fact sticks. */
+    if (!v36) {
+        ShowTitle(screen, FALSE);
+        LoadRGB4(ViewPortAddress(window), ansi_rgb4, 8);
+    }
+
     /* The kiosk takes no pointer input, so hide the Intuition pointer:
      * a blank 1-row sprite (chip RAM, zeroed) instead of the busy/arrow
      * imagery darting over the text whenever the host mouse moves.
@@ -753,16 +805,12 @@ static int setup(void)
     if (blank_pointer)
         SetPointer(window, blank_pointer, 1, 16, 0, 0);
 
-    con_rd_port = CreateMsgPort();
-    con_wr_port = CreateMsgPort();
+    con_rd_port = port_init(&port_rd);
+    con_wr_port = port_init(&port_wr);
     if (!con_rd_port || !con_wr_port)
         return 5;
-    con_rd = (struct IOStdReq *)CreateIORequest(con_rd_port,
-                                                sizeof(struct IOStdReq));
-    con_wr = (struct IOStdReq *)CreateIORequest(con_wr_port,
-                                                sizeof(struct IOStdReq));
-    if (!con_rd || !con_wr)
-        return 6;
+    con_rd = ioreq_init(&ioreq_rd, con_rd_port);
+    con_wr = ioreq_init(&ioreq_wr, con_wr_port);
 
     /* Console attached to our window; clone the opened device into the
      * read request. */
@@ -836,14 +884,12 @@ static void cleanup(void)
     }
     if (con_open)
         CloseDevice((struct IORequest *)con_wr);
-    if (con_wr)
-        DeleteIORequest(con_wr);
-    if (con_rd)
-        DeleteIORequest(con_rd);
+    /* The ports and requests are static; only the ports' signal bits
+     * were allocated. */
     if (con_wr_port)
-        DeleteMsgPort(con_wr_port);
+        FreeSignal(con_wr_port->mp_SigBit);
     if (con_rd_port)
-        DeleteMsgPort(con_rd_port);
+        FreeSignal(con_rd_port->mp_SigBit);
     if (blank_pointer) {
         if (window)
             ClearPointer(window);

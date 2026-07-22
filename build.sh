@@ -9,7 +9,10 @@
 cd "$(dirname "$0")"
 CC="${CC:-/opt/amiga/bin/m68k-amigaos-gcc}"
 
-"$CC" -O2 -fomit-frame-pointer -noixemul -o term retro32term.c
+# -lnix13 keeps utility.library out of the binary: stock libnix backs the
+# compiler's 32-bit multiply/divide helpers with utility.library calls,
+# which Kickstart 1.3 does not have; libnix13's versions are pure software.
+"$CC" -O2 -fomit-frame-pointer -noixemul -o term retro32term.c -lnix13
 
 rm -f retro32-term.adf
 xdftool retro32-term.adf create + format "Retro32" ofs + boot install \

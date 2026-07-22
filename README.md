@@ -20,6 +20,8 @@ and the BBS banner appears.
   ordering that reliably beats the OS default palette everywhere (AROS
   loads its preference colours onto every new screen) -- with
   SA_ShowTitle off so the screen bar stays behind the backdrop window.
+  On a V34 intuition (Kickstart 1.3), which takes no tags, the same is
+  done by hand with LoadRGB4 and ShowTitle after the screen opens.
   SGR colours 30-37 map one-to-one to pens; the Amiga console renders
   in Topaz 8 -- the font Amiga-oriented BBSes design for. Special keys
   (arrows) go out as ESC [ sequences.
@@ -140,8 +142,15 @@ dedicated kiosk disk should do anyway.
   the terminal starts -- a real BBS dialled after boot never sees it,
   and the browser bridge connects after boot anyway -- and held keys
   do not repeat.
-- Kickstart 1.x: not supported (the console plumbing uses
-  `CreateMsgPort`/`CreateIORequest`, V36+).
+- **Kickstart 1.3: byte-perfect, full ANSI colour on black, 19200
+  baud.** Three 2.0-isms are fenced off for it: the build links
+  `libnix13` (stock libnix implements the compiler's 32-bit
+  multiply/divide helpers as utility.library calls, and utility.library
+  does not exist before 2.0 -- without this the binary dies on startup
+  complaining about it), the message ports and IORequests are
+  hand-rolled statics (`CreateMsgPort`/`CreateIORequest` are V36+), and
+  the screen open falls back from `OpenScreenTagList` to `OpenScreen`
+  plus `LoadRGB4`/`ShowTitle` on a V34 intuition.
 
 ## Building
 

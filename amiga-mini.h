@@ -47,6 +47,19 @@ struct List {
     UBYTE l_pad;
 };
 
+struct Library {
+    struct Node lib_Node;
+    UBYTE lib_Flags;
+    UBYTE lib_pad;
+    UWORD lib_NegSize;
+    UWORD lib_PosSize;
+    UWORD lib_Version; /* offset 20 */
+    UWORD lib_Revision;
+    APTR lib_IdString;
+    ULONG lib_Sum;
+    UWORD lib_OpenCnt;
+};
+
 struct MsgPort {
     struct Node mp_Node;
     UBYTE mp_Flags;
@@ -114,6 +127,10 @@ struct Interrupt {
 };
 
 #define NT_INTERRUPT 2
+#define NT_MSGPORT 4
+#define NT_MESSAGE 5
+
+#define PA_SIGNAL 0
 
 #define CMD_READ 2
 #define CMD_WRITE 3
@@ -202,7 +219,6 @@ struct TagItem {
 
 /* --- intuition / graphics ------------------------------------------------ */
 
-struct Library;
 struct Screen;  /* opaque */
 struct Window;  /* opaque; console.device only needs the pointer */
 struct ViewPort;
@@ -314,18 +330,10 @@ extern struct Library *GfxBase;
     LP1(0x1da, BYTE, WaitIO, struct IORequest *, req, a1, , SysBase)
 #define AbortIO(req) \
     LP1NR(0x1e0, AbortIO, struct IORequest *, req, a1, , SysBase)
-#define CreateIORequest(port, size) \
-    LP2(0x28e, APTR, CreateIORequest, struct MsgPort *, port, a0, ULONG, size, d0, , SysBase)
-#define DeleteIORequest(req) \
-    LP1NR(0x294, DeleteIORequest, APTR, req, a0, , SysBase)
-#define CreateMsgPort() \
-    LP0(0x29a, struct MsgPort *, CreateMsgPort, , SysBase)
 #define FindName(list, name) \
     LP2(0x114, struct Node *, FindName, struct List *, list, a0, CONST_STRPTR, name, a1, , SysBase)
 #define FindResident(name) \
     LP1(0x60, struct Resident *, FindResident, CONST_STRPTR, name, a1, , SysBase)
-#define DeleteMsgPort(port) \
-    LP1NR(0x2a0, DeleteMsgPort, struct MsgPort *, port, a0, , SysBase)
 #define SetIntVector(num, interrupt) \
     LP2(0xa2, struct Interrupt *, SetIntVector, LONG, num, d0, struct Interrupt *, interrupt, a1, , SysBase)
 #define SetFunction(lib, offset, func) \
@@ -367,11 +375,13 @@ extern struct Library *GfxBase;
           LONG, wd, d1, LONG, x, d2, LONG, y, d3, , IntuitionBase)
 #define ClearPointer(w) \
     LP1NR(0x3c, ClearPointer, struct Window *, w, a0, , IntuitionBase)
+#define ShowTitle(s, showit) \
+    LP2NR(0x11a, ShowTitle, struct Screen *, s, a0, BOOL, showit, d0, , IntuitionBase)
 
 /* graphics.library (offset from inline/graphics.h) */
-#define SetRGB4(vp, n, r, g, b) \
-    LP5NR(0x120, SetRGB4, struct ViewPort *, vp, a0, WORD, n, d0, \
-          UBYTE, r, d1, UBYTE, g, d2, UBYTE, b, d3, , GfxBase)
+#define LoadRGB4(vp, colors, count) \
+    LP3NR(0xc0, LoadRGB4, struct ViewPort *, vp, a0, const UWORD *, colors, a1, \
+          WORD, count, d0, , GfxBase)
 
 /* console.device library-style call (offset from inline/console.h; the
  * base is the opened device, io_Device from any console IORequest).
