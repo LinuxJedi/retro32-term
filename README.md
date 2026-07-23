@@ -15,89 +15,102 @@ and the BBS banner appears.
 
 - `term` -- a small serial terminal (`retro32term.c`): drives Paula's
   UART directly (SERPER/SERDAT/SERDATR plus an RBF interrupt handler)
-  and renders through console.device on its own 8-colour hires screen.
-  The ANSI palette is handed to intuition with SA_Colors -- the only
-  ordering that reliably beats the OS default palette everywhere (AROS
-  loads its preference colours onto every new screen) -- with
-  SA_ShowTitle off so the screen bar stays behind the backdrop window.
-  On a V34 intuition (Kickstart 1.3), which takes no tags, the same is
-  done by hand with LoadRGB4 and ShowTitle after the screen opens.
-  SGR colours 30-37 map one-to-one to pens; the Amiga console renders
-  in Topaz 8 -- the font Amiga-oriented BBSes design for. Special keys
-  (arrows) go out as ESC [ sequences.
+  and renders PC ANSI itself on its own 16-colour hires screen.
+  Four bitplanes at 640 wide is legal on plain OCS, so the full CGA
+  palette needs no AGA anywhere. The palette is handed to intuition
+  with SA_Colors -- the only ordering that reliably beats the OS
+  default palette everywhere (AROS loads its preference colours onto
+  every new screen) -- with SA_ShowTitle off so the screen bar stays
+  behind the backdrop window. On a V34 intuition (Kickstart 1.3),
+  which takes no tags, the same is done by hand with LoadRGB4 and
+  ShowTitle after the screen opens. Glyphs are the machine's own ROM
+  Topaz 8 -- the font Amiga-oriented BBSes design for -- extracted at
+  startup. Special keys (arrows) go out as ESC [ sequences.
 - `s/startup-sequence` -- just runs `term`.
 
-Incoming CSI sequences are reassembled whole and re-emitted in 8-bit
-CSI form, normalized to exactly what the console is known to parse --
-a whitelist, not a pass-through, because the AROS console's failure
-mode for a sequence it cannot match is not "ignored": its command
-scanner runs past the final byte and consumes the output that
-follows, printing fragments of it as literal text (seen live as
-mangled menu lines when the BBS sent its ECMA-48 font selection,
-`ESC[0;40 D`). Concretely:
+Earlier versions rendered through console.device with a translation
+shim in front of it. That was abandoned: the console cannot express PC
+ANSI. SGR 1 is a brightness bit on a PC (`1;30` is the dark grey BBS
+art uses for shadows and dot leaders) but a font weight to the console,
+which smears the glyphs and leaves bright black as black-on-black; and
+the console addresses only pens 0-7 on every Kickstart, so the bright
+palette half is structurally unreachable no matter how deep the screen
+is. The AROS console additionally had to be defended against outright
+(its command scanner runs past finals it does not know and prints the
+following output as literal text). The terminal now parses ECMA-48
+itself and draws straight into the bitplanes:
 
-- Multi-parameter SGRs (`ESC[1;33m`) are split into consecutive
-  single-parameter ones: the AROS console only parses the
-  single-parameter form, and the split is semantically identical on
-  Kickstart.
-- Parameterized erase sequences are translated, because the Amiga
-  console's `CSI J` / `CSI K` take no parameter and only erase toward
-  the end (which left old text on screen at every BBS page change):
-  `ESC[2J` becomes a formfeed (the console's whole-screen
-  clear-and-home, matching the ANSI.SYS semantics BBSes assume),
-  `ESC[2K` becomes CR plus erase-to-end-of-line, explicit `0`
-  parameters are stripped, and the erase-backwards forms (`1J`/`1K`,
-  no console equivalent, rare in BBS output) are dropped.
-- `ESC[y;xf` (HVP) is rewritten to the `H` form the console
-  understands, and `ESC[nG` (cursor to absolute column) becomes CR
-  plus cursor-forward.
-- Cursor motion, insert/delete, and scroll sequences pass through
-  clamped to the parameter count the console accepts (one, two for
-  `H`).
-- Everything else -- private modes (`ESC[?25l`), intermediate bytes,
-  colon subparameters, window ops, save/restore cursor -- is
-  swallowed whole, exactly as a real terminal ignores what it does
-  not implement.
+- A character cell is 8x8 pixels, and 8 hires pixels are one byte per
+  bitplane, so a glyph is 32 byte-aligned CPU writes with foreground
+  and background masks. Scrolls, erases and insert/delete run through
+  `BltBitMap` (minterm 0xFF/0x00 with a plane mask paints any pen);
+  the one rule is `WaitBlit` before the next CPU write to the planes.
+- PC semantics throughout: the 16-colour CGA palette in ANSI order
+  (pen 8 is the dark grey the rewrite exists for), bold folds into
+  bright foregrounds and blink into bright backgrounds (iCE colours),
+  erases fill with the current background (BCE), `ESC[2J` homes the
+  cursor like ANSI.SYS, and autowrap is deferred DEC-style (a glyph
+  in column 80 parks the cursor; the next glyph wraps), so both
+  80-column art styles render correctly.
+- Cursor motion, erase (including the backwards forms), CHA, HVP,
+  insert/delete character and line, scroll region-less SU/SD,
+  save/restore cursor, and `ESC[?25l/h` cursor visibility are all
+  implemented; DSR 6 (cursor position report) is answered on the
+  serial line directly, on Kickstart and AROS alike.
+- Extended-colour introducers (`38;5;N`, `38;2;R;G;B`) consume their
+  sub-arguments and drop them; everything else unknown -- private
+  modes, intermediate bytes, colon subparameters, window ops -- is
+  parsed to its final byte and ignored, exactly as a real terminal
+  does.
 
-The RBF interrupt handler copes with both interrupt-dispatch
-conventions: classic exec calls it with RBF still pending (the handler
-acks), while AROS acks INTREQ before dispatching (the word stays
-latched in SERDATR). It therefore banks the first byte unconditionally
-on entry -- the handler only ever runs because a word arrived. The
-ring indices between the handler and the main loop are UWORDs: a 68000
-writes a word atomically but a longword as two accesses, and a torn
-32-bit counter silently drops bytes.
+The receive path takes the 68000 level-5 autovector directly on BOTH
+platforms -- neither OS's interrupt dispatch is compatible with a
+one-byte hardware latch at sustained line rate. AROS acks INTREQ
+before dispatching `SetIntVector` handlers, which unprotects Paula's
+receive latch and lets a completing word silently overwrite the unread
+one. Kickstart dispatches correctly but too slowly once the
+4-bitplane hires display owns the chip bus: exec's handler path plus a
+`Signal()` per interrupt runs a few hundred cycles on a CPU that only
+sees blanking slots, which overshoots the ~520 us character time
+(measured: scattered `[LOST]` at 19200 the moment the screen went 4
+planes deep). With the direct vector the handler banks the latched
+word with the request bit still protecting it, and both main loops
+busy-poll instead of sleeping, so no OS call ever sits between a byte
+arriving and being banked. Level 5 also serves DSKSYN on Kickstart;
+the terminal parks that source (it never touches the floppy again)
+and restores it on exit. The ring indices between the handler and the
+main loop are UWORDs: a 68000 writes a word atomically but a longword
+as two accesses, and a torn 32-bit counter silently drops bytes.
 
-Line settings: 8N1, 19200 on both Kickstart and AROS. Paula buffers a
-single received byte, so every byte must be serviced within one
-character time; Kickstart manages 19200 comfortably. AROS's scheduler
-masks all interrupts in roughly millisecond stretches -- longer than a
-19200 character time -- which used to force 4800 there. The terminal
-now sidesteps the AROS scheduler entirely: those masked stretches only
-happen when the interrupt-exit path invokes the scheduler
-(`core_ExitIntr` in AROS's `arch/m68k-all/kernel/kernel_intr.c`), and
-that is skipped whenever task switching is disabled. So on AROS
-(detected via `FindResident("aros.library")`) the main loop holds
-`Forbid()` permanently and never calls `Wait()` -- it busy-polls
-instead, which a dedicated kiosk disk can afford -- and the RBF
-interrupt then always runs on time. Console output still works under a
-permanent Forbid because AROS completes console `CMD_WRITE` in the
-caller's context; console reads would not, so in this mode the keyboard
-is polled straight from CIA-A (scancode from SDR, KDAT handshake by
-beam-counter timing) and translated through console.device's
-synchronous `RawKeyConvert()`. The trade-offs: on AROS no other task
-ever runs again (fine, it is a kiosk; Ctrl-Amiga-Amiga still reboots)
-and there is no key repeat (that was input.device's job). Change the
-`BAUD_*` defines and rebuild to tune. The program also clears the
-DMACON blitter-hog bit at startup, because console scrolls are big
-blits that would otherwise lock the CPU off the chip bus for longer
-than a character time.
+Line settings: 8N1, 19200 on both Kickstart and AROS. AROS needs one
+more measure: its scheduler masks all interrupts in roughly
+millisecond stretches -- longer than a 19200 character time. Those
+masked stretches only happen when the interrupt-exit path invokes the
+scheduler (`core_ExitIntr` in AROS's
+`arch/m68k-all/kernel/kernel_intr.c`), and that is skipped whenever
+task switching is disabled, so on AROS (detected via
+`FindResident("aros.library")`) the loop holds `Forbid()`
+permanently. Rendering does not mind -- the engine writes the
+bitplanes with the CPU and `BltBitMap` runs in the caller's context --
+but keyboard input needs a live input.device, so under Forbid the
+keyboard is polled straight from CIA-A (scancode from SDR, KDAT
+handshake by beam-counter timing) and translated through
+console.device's synchronous `RawKeyConvert()` (the device is opened
+in `CONU_LIBRARY` mode purely for that vector). On Kickstart the same
+translation is fed from RAWKEY IDCMP messages, which also keeps key
+repeat. The trade-offs: on AROS no other task ever runs again (fine,
+it is a kiosk; Ctrl-Amiga-Amiga still reboots) and held keys do not
+repeat there (that was input.device's job). Change the `BAUD_*`
+defines and rebuild to tune. The program also clears the DMACON
+blitter-hog bit at startup, because scrolls and fills are big blits
+that would otherwise lock the CPU off the chip bus for longer than a
+character time.
 
 Clearing blitter-hog is not enough on AROS, though: its m68k
 `WaitBlit` (`arch/m68k-amiga/graphics/waitblit.S`) re-asserts
 blitter-nasty for the duration of every wait and deliberately parks
 the CPU off the chip bus until the blit completes. With no fast RAM,
-the RBF handler's instruction fetches stall with it, so any console
+the RBF handler's instruction fetches stall with it, so any screen
 blit longer than a character time silently overran Paula's one-byte
 receive latch (measured: ~12 lost bytes per 10 KiB page, surfacing as
 scattered mangled characters). The kiosk therefore `SetFunction()`s
@@ -107,11 +120,12 @@ sharing the bus, and reception stays byte-perfect (verified with
 emulator-side overrun instrumentation: zero drops across the same
 replayed page).
 
-The receive ring between the interrupt handler and the console is
-32 KiB -- about 17 seconds of line-rate data. That is deliberate: the
-AROS console renders SGR-heavy screens far slower than the 19200 line
-rate, so most of a large BBS page sits in the ring while the console
-catches up, and the ring must hold a whole page (the 8 KiB it replaced
+The receive ring between the interrupt handler and the renderer is
+32 KiB -- about 17 seconds of line-rate data. That is deliberate:
+rendering runs slower than the 19200 line rate on a stock 68000
+(glyphs are cheap, but scrolls wait on 4-plane blits), so part of a
+large BBS page sits in the ring while drawing catches up, and the
+ring must hold a whole page (the 8 KiB it replaced
 overflowed mid-page on the larger Retro32 menus, which surfaced as
 mangled text in the second half of the page). On overflow the handler
 now drops the new byte cleanly -- the write pointer must not step past
@@ -128,6 +142,23 @@ Driving the hardware works identically everywhere and is what a
 dedicated kiosk disk should do anyway.
 
 ## ROM compatibility
+
+The 16-colour renderer build is verified byte-perfect at 19200 under
+Copperline on Kickstart 3.1 and the AROS ROM (colour test page plus an
+80-line coloured-ruler blast that scrolls the whole screen at
+sustained line rate). Sizing note for AROS: the 80 KiB 4-plane bitmap
+must live in chip RAM -- bitplane DMA cannot reach the $C00000
+trapdoor slow RAM, and the terminal's other allocations (binary, ring,
+font) already land in slow RAM by exec's own preference -- and an AROS
+boot does not leave 80 KiB of chip free in tight configs. Verified
+working for 16 colours: the default A500 machine with `--chip 1M`
+(which keeps the 512 KiB trapdoor slow RAM, so AROS's own allocations
+stay out of chip). NOT sufficient: 512 KiB chip, and also the A500+
+profile (1 MB chip but no slow RAM -- AROS then lives entirely in chip
+and the screen open still fails). There is deliberately no shallower
+screen fallback: when the open fails the terminal exits with a message
+saying chip RAM is what it needs. Kickstart boots run 16-colour in
+stock 512K chip + 512K slow.
 
 - **Kickstart 2.0+ (2.05 and 3.1 verified): byte-perfect, full ANSI
   colour on black, 19200 baud.**

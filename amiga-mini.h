@@ -22,6 +22,7 @@ typedef signed long LONG;
 typedef void *APTR;
 typedef short BOOL;
 typedef const char *CONST_STRPTR;
+typedef UBYTE *PLANEPTR;
 
 #define TRUE 1
 #define FALSE 0
@@ -120,26 +121,19 @@ struct IOExtSer {
 struct Task; /* opaque */
 struct Resident; /* opaque */
 
-struct Interrupt {
-    struct Node is_Node;
-    APTR is_Data;
-    void (*is_Code)(void);
-};
-
-#define NT_INTERRUPT 2
 #define NT_MSGPORT 4
 #define NT_MESSAGE 5
 
 #define PA_SIGNAL 0
 
-#define CMD_READ 2
-#define CMD_WRITE 3
 #define SDCMD_QUERY 9
 #define SDCMD_SETPARAMS 11
 #define SERF_XDISABLED (1 << 7)
 #define SERF_SHARED (1 << 5)
 
-#define CONU_STANDARD 0
+/* Unit -1 opens console.device in library mode: no window, no unit task,
+ * just the device function vectors (RawKeyConvert). */
+#define CONU_LIBRARY 0xFFFFFFFFUL
 
 #define SIGBREAKF_CTRL_C (1UL << 12)
 
@@ -148,6 +142,7 @@ struct Interrupt {
 #define CUSTOM_SERDATR (*(volatile UWORD *)0xDFF018)
 #define CUSTOM_SERDAT (*(volatile UWORD *)0xDFF030)
 #define CUSTOM_SERPER (*(volatile UWORD *)0xDFF032)
+#define CUSTOM_INTENAR (*(volatile UWORD *)0xDFF01C)
 #define CUSTOM_INTENA (*(volatile UWORD *)0xDFF09A)
 #define CUSTOM_INTREQ (*(volatile UWORD *)0xDFF09C)
 #define CUSTOM_DMACON (*(volatile UWORD *)0xDFF096)
@@ -158,9 +153,9 @@ struct Interrupt {
 #define SERDATR_RBF (1 << 14)   /* receive buffer full */
 #define SERDATR_TBE (1 << 13)   /* transmit buffer empty */
 
-#define INTB_RBF 11
 #define INTF_SETCLR 0x8000
 #define INTF_INTEN 0x4000
+#define INTF_DSKSYN 0x1000
 #define INTF_RBF 0x0800
 #define INTF_EXTER 0x2000
 #define INTF_PORTS 0x0008
@@ -219,9 +214,83 @@ struct TagItem {
 
 /* --- intuition / graphics ------------------------------------------------ */
 
-struct Screen;  /* opaque */
-struct Window;  /* opaque; console.device only needs the pointer */
-struct ViewPort;
+struct Window; /* opaque; the one field used is reached via WINDOW_USERPORT */
+
+/* intuition/intuition.h: Window.UserPort, the IDCMP message port
+ * intuition creates when a window opens with IDCMPFlags set. */
+#define WINDOW_USERPORT(w) (*(struct MsgPort **)((UBYTE *)(w) + 86))
+
+/* graphics/gfx.h */
+struct BitMap {
+    UWORD BytesPerRow;
+    UWORD Rows;
+    UBYTE Flags;
+    UBYTE Depth;
+    UWORD pad;
+    PLANEPTR Planes[8];
+};
+
+/* graphics/view.h: needed only for its size inside struct Screen. */
+struct ViewPort {
+    struct ViewPort *Next;
+    APTR ColorMap;
+    APTR DspIns;
+    APTR SprIns;
+    APTR ClrIns;
+    APTR UCopIns;
+    WORD DWidth, DHeight;
+    WORD DxOffset, DyOffset;
+    UWORD Modes;
+    UBYTE SpritePriorities;
+    UBYTE ExtendedModes;
+    APTR RasInfo;
+};
+
+/* graphics/rastport.h: needed for its size and the BitMap pointer. */
+struct RastPort {
+    APTR Layer;
+    struct BitMap *BitMap;
+    UWORD *AreaPtrn;
+    APTR TmpRas;
+    APTR AreaInfo;
+    APTR GelsInfo;
+    UBYTE Mask;
+    BYTE FgPen, BgPen, AOlPen;
+    BYTE DrawMode, AreaPtSz, linpatcnt, dummy;
+    UWORD Flags;
+    UWORD LinePtrn;
+    WORD cp_x, cp_y;
+    UBYTE minterms[8];
+    WORD PenWidth, PenHeight;
+    APTR Font;
+    UBYTE AlgoStyle, TxFlags;
+    UWORD TxHeight, TxWidth, TxBaseline;
+    WORD TxSpacing;
+    APTR *RP_User;
+    ULONG longreserved[2];
+    UWORD wordreserved[7];
+    UBYTE reserved[8];
+};
+
+/* intuition/screens.h, truncated after the members this program reads
+ * (RastPort at offset 84, BitMap at 184 per the published ABI); never
+ * used by value, so the missing tail is harmless. */
+struct Screen {
+    struct Screen *NextScreen;
+    struct Window *FirstWindow;
+    WORD LeftEdge, TopEdge;
+    WORD Width, Height;
+    WORD MouseY, MouseX;
+    UWORD Flags;
+    UBYTE *Title;
+    UBYTE *DefaultTitle;
+    BYTE BarHeight, BarVBorder, BarHBorder, MenuVBorder, MenuHBorder;
+    BYTE WBorTop, WBorLeft, WBorRight, WBorBottom;
+    struct TextAttr *Font;
+    struct ViewPort ViewPort;
+    struct RastPort RastPort;
+    struct BitMap BitMap;
+};
 
 /* intuition/intuition.h: SA_Colors entry; 4-bit gun values, terminated by
  * ColorIndex = -1. */
@@ -239,6 +308,41 @@ struct TextAttr {
     UBYTE ta_Style;
     UBYTE ta_Flags;
 };
+
+/* graphics/text.h: opened font, for pulling glyph bitmaps out of the
+ * ROM Topaz. tf_CharData is a wide bitmap tf_Modulo bytes per row;
+ * tf_CharLoc holds one ULONG per glyph, bit offset in the high word
+ * and bit width in the low. Truncated after the members read here. */
+struct TextFont {
+    struct Message tf_Message;
+    UWORD tf_YSize;
+    UBYTE tf_Style;
+    UBYTE tf_Flags;
+    UWORD tf_XSize;
+    UWORD tf_Baseline;
+    UWORD tf_BoldSmear;
+    UWORD tf_Accessors;
+    UBYTE tf_LoChar;
+    UBYTE tf_HiChar;
+    APTR tf_CharData;
+    UWORD tf_Modulo;
+    APTR tf_CharLoc;
+};
+
+/* intuition/intuition.h: IDCMP message, for RAWKEY input. */
+struct IntuiMessage {
+    struct Message ExecMessage;
+    ULONG Class;
+    UWORD Code;
+    UWORD Qualifier;
+    APTR IAddress;
+    WORD MouseX, MouseY;
+    ULONG Seconds, Micros;
+    struct Window *IDCMPWindow;
+    struct IntuiMessage *SpecialLink;
+};
+
+#define IDCMP_RAWKEY 0x00000400UL
 
 /* intuition/screens.h screen tags (V36+). */
 #define SA_Dummy (TAG_USER + 32)
@@ -276,10 +380,6 @@ struct NewWindow {
     UWORD Type;
 };
 
-/* sizeof(struct Window) for console.device's io_Length; the device only
- * dereferences io_Data. */
-#define WINDOW_SIZEOF 136
-
 #define HIRES 0x8000
 #define CUSTOMSCREEN 0x000F
 #define SCREENQUIET 0x0100
@@ -307,10 +407,10 @@ extern struct Library *GfxBase;
     LP0NR(0x84, Forbid, , SysBase)
 #define Permit() \
     LP0NR(0x8a, Permit, , SysBase)
-#define Wait(sigs) \
-    LP1(0x13e, ULONG, Wait, ULONG, sigs, d0, , SysBase)
 #define GetMsg(port) \
     LP1(0x174, struct Message *, GetMsg, struct MsgPort *, port, a0, , SysBase)
+#define ReplyMsg(message) \
+    LP1NR(0x17a, ReplyMsg, struct Message *, message, a1, , SysBase)
 #define OpenLibrary(name, ver) \
     LP2(0x228, struct Library *, OpenLibrary, CONST_STRPTR, name, a1, ULONG, ver, d0, , SysBase)
 #define CloseLibrary(lib) \
@@ -334,15 +434,13 @@ extern struct Library *GfxBase;
     LP2(0x114, struct Node *, FindName, struct List *, list, a0, CONST_STRPTR, name, a1, , SysBase)
 #define FindResident(name) \
     LP1(0x60, struct Resident *, FindResident, CONST_STRPTR, name, a1, , SysBase)
-#define SetIntVector(num, interrupt) \
-    LP2(0xa2, struct Interrupt *, SetIntVector, LONG, num, d0, struct Interrupt *, interrupt, a1, , SysBase)
 #define SetFunction(lib, offset, func) \
     LP3(0x1a4, APTR, SetFunction, struct Library *, lib, a1, LONG, offset, a0, \
         APTR, func, d0, , SysBase)
 #define FindTask(name) \
     LP1(0x126, struct Task *, FindTask, CONST_STRPTR, name, a1, , SysBase)
-#define Signal(task, sigs) \
-    LP2NR(0x144, Signal, struct Task *, task, a1, ULONG, sigs, d0, , SysBase)
+#define SetSignal(newSignals, signalSet) \
+    LP2(0x132, ULONG, SetSignal, ULONG, newSignals, d0, ULONG, signalSet, d1, , SysBase)
 #define AllocSignal(num) \
     LP1(0x14a, BYTE, AllocSignal, LONG, num, d0, , SysBase)
 #define FreeSignal(num) \
@@ -378,10 +476,21 @@ extern struct Library *GfxBase;
 #define ShowTitle(s, showit) \
     LP2NR(0x11a, ShowTitle, struct Screen *, s, a0, BOOL, showit, d0, , IntuitionBase)
 
-/* graphics.library (offset from inline/graphics.h) */
+/* graphics.library (offsets from inline/graphics.h) */
 #define LoadRGB4(vp, colors, count) \
     LP3NR(0xc0, LoadRGB4, struct ViewPort *, vp, a0, const UWORD *, colors, a1, \
           WORD, count, d0, , GfxBase)
+#define BltBitMap(srcBitMap, xSrc, ySrc, destBitMap, xDest, yDest, xSize, ySize, minterm, mask, tempA) \
+    LP11(0x1e, LONG, BltBitMap, struct BitMap *, srcBitMap, a0, LONG, xSrc, d0, \
+         LONG, ySrc, d1, struct BitMap *, destBitMap, a1, LONG, xDest, d2, \
+         LONG, yDest, d3, LONG, xSize, d4, LONG, ySize, d5, ULONG, minterm, d6, \
+         ULONG, mask, d7, PLANEPTR, tempA, a2, , GfxBase)
+#define WaitBlit() \
+    LP0NR(0xe4, WaitBlit, , GfxBase)
+#define OpenFont(textAttr) \
+    LP1(0x48, struct TextFont *, OpenFont, struct TextAttr *, textAttr, a0, , GfxBase)
+#define CloseFont(textFont) \
+    LP1NR(0x4e, CloseFont, struct TextFont *, textFont, a1, , GfxBase)
 
 /* console.device library-style call (offset from inline/console.h; the
  * base is the opened device, io_Device from any console IORequest).
